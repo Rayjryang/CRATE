@@ -40,6 +40,7 @@ parser.add_argument('--n_epochs', type=int, default='400')
 parser.add_argument('--patch', default='4', type=int, help="patch for ViT")
 parser.add_argument('--ckpt_dir', type=str, default=None,help='location for the pretrained CRATE weight')
 parser.add_argument('--data_dir', type=str, default='./data',help='location for datasets')
+parser.add_argument('--save_dir', type=str, default=None,help='location for saving checkpoints and logs')
 
 args = parser.parse_args()
 
@@ -79,6 +80,11 @@ if args.ckpt_dir is None:
     print("Train from scratch.")
 
 print(args)
+save_ckpt_dir = os.path.join(args.save_dir,'checkpoint')
+save_log_dir = os.path.join(args.save_dir,'log')
+os.makedirs(args.data_dir, exist_ok=True)
+os.makedirs(save_ckpt_dir, exist_ok=True)
+os.makedirs(save_log_dir, exist_ok=True)
 
 if args.net == 'vit_tiny':
     net = vit_tiny_patch16(global_pool=True)
@@ -102,16 +108,29 @@ elif args.net == "CRATE_alpha_large":
 # For Multi-GPU
 if 'cuda' in device:
     print(device)
-    print("using data parallel")
-    net = torch.nn.DataParallel(net) # make parallel
+   
     if args.ckpt_dir is not None:
         #upd keys
         state_dict = torch.load(args.ckpt_dir)
-        for key in list(state_dict.keys()):
-            if 'mlp_head.1' in key:
-                del state_dict[key]
-                print("deleted:", key)
-        net.load_state_dict(state_dict, strict=False)
+        # for key in list(state_dict.keys()):
+        #     if 'mlp_head.1' in key:
+        #         del state_dict[key]
+        #         print("deleted:", key)
+        # net.load_state_dict(state_dict, strict=False)
+        print(f"loading checkpoint from {args.ckpt_dir}")
+        model_dict = {}
+        for k,v in net.state_dict().items():
+            # print(k)
+            if 'mlp_head.1' in k:
+                model_dict[k] = v * 0
+            else:
+                model_dict[k] = state_dict[k]
+
+        net.load_state_dict(model_dict)
+
+    print("using data parallel")
+    net = torch.nn.DataParallel(net) # make parallel
+
     cudnn.benchmark = True
 
 
@@ -136,6 +155,8 @@ elif args.opt == "adamW":
     optimizer = optim.AdamW(net.parameters(), lr=args.lr, weight_decay=0.01, betas = (0.9, 0.999), eps = 1e-8)
 # use cosine scheduling
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
+
+
 
 ##### Training
 scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -192,16 +213,18 @@ def test(epoch):
         print('Saving..')
         state = {"model": net.state_dict(),
               "optimizer": optimizer.state_dict(),
-              "scaler": scaler.state_dict()}
-        if not os.path.isdir('checkpoint'):
-            os.mkdir('checkpoint')
-        torch.save(state, f'./checkpoint/{args.net}-{args.data}-{args.patch}-ckpt.pth')
+              "scaler": scaler.state_dict(),
+              "best_epoch": epoch,
+              "best_acc": acc }
+        
+      
+        torch.save(state, f'{save_ckpt_dir}/{args.net}-{args.data}-{args.patch}-ckpt.pth')
         best_acc = acc
     
-    os.makedirs("log", exist_ok=True)
+   
     content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, val loss: {test_loss:.5f}, acc: {(acc):.5f}'
     print(content)
-    with open(f'log/log_{args.net}_{args.data}_patch{args.patch}.txt', 'a') as appender:
+    with open(f'{save_log_dir}/log_{args.net}_{args.data}_patch{args.patch}.txt', 'a') as appender:
         appender.write(content + "\n")
     return test_loss, acc
 
@@ -209,6 +232,8 @@ list_loss = []
 list_acc = []
 
 net.cuda()
+
+
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
     trainloss = train(epoch)
@@ -220,7 +245,7 @@ for epoch in range(start_epoch, args.n_epochs):
     list_acc.append(acc)
 
     # Write out csv..
-    with open(f'log/log_{args.net}_{args.data}_patch{args.patch}.csv', 'w') as f:
+    with open(f'{save_log_dir}/log_{args.net}_{args.data}_patch{args.patch}.csv', 'w') as f:
         writer = csv.writer(f, lineterminator='\n')
         writer.writerow(list_loss) 
         writer.writerow(list_acc) 
